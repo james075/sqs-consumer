@@ -163,16 +163,25 @@ Consumer.prototype._processMessages = function (messages, cb) {
   });
 };
 
-Consumer.prototype._deleteMessage = function (message, cb) {
+Consumer.prototype._deleteMessages = function (messages, cb) {
   var deleteParams = {
-    QueueUrl: this.queueUrl,
-    ReceiptHandle: message.ReceiptHandle
+    Entries: [],
+    QueueUrl: this.queueUrl
   };
 
-  debug('Deleting message %s', message.MessageId);
-  this.sqs.deleteMessage(deleteParams, function (err) {
-    if (err) return cb(new SQSError('SQS delete message failed: ' + err.message));
+  messages.forEach(function(message) {
+    deleteParams.Entries.push({
+      Id: message.MessageId,
+      ReceiptHandle: message.ReceiptHandle,
+    });
+  });
 
+  debug('Deleting entries', deleteParams.Entries);
+
+  this.sqs.deleteMessageBatch(deleteParams, function (err) {
+    if (err) {
+      return cb(new SQSError('SQS delete message failed: ' + err.message));
+    }
     cb();
   });
 };
