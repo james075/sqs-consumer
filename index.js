@@ -7,7 +7,7 @@ var AWS = require('aws-sdk');
 var debug = require('debug')('sqs-consumer');
 var requiredOptions = [
     'queueUrl',
-    'handleMessage'
+    'handleMessages'
   ];
 
 /**
@@ -40,7 +40,7 @@ function isAuthenticationError(err) {
  * @param {object} options
  * @param {string} options.queueUrl
  * @param {string} options.region
- * @param {function} options.handleMessage
+ * @param {function} options.handleMessages
  * @param {array} options.attributeNames
  * @param {array} options.messageAttributeNames
  * @param {number} options.batchSize
@@ -52,7 +52,7 @@ function Consumer(options) {
   validate(options);
 
   this.queueUrl = options.queueUrl;
-  this.handleMessage = options.handleMessage;
+  this.handleMessages = options.handleMessages;
   this.attributeNames = options.attributeNames || [];
   this.messageAttributeNames = options.messageAttributeNames || [];
   this.stopped = true;
@@ -66,7 +66,7 @@ function Consumer(options) {
   });
 
   this._handleSqsResponseBound = this._handleSqsResponse.bind(this);
-  this._processMessageBound = this._processMessage.bind(this);
+  this._processMessageBound = this._processMessages.bind(this);
 }
 
 util.inherits(Consumer, EventEmitter);
@@ -124,8 +124,7 @@ Consumer.prototype._handleSqsResponse = function (err, response) {
   debug(response);
 
   if (response && response.Messages && response.Messages.length > 0) {
-    async.each(response.Messages, this._processMessageBound, function () {
-      // start polling again once all of the messages have been processed
+    this._processMessageBound(response.Messages, function() {
       consumer._poll();
     });
   } else if (err && isAuthenticationError(err)) {
@@ -138,16 +137,17 @@ Consumer.prototype._handleSqsResponse = function (err, response) {
   }
 };
 
-Consumer.prototype._processMessage = function (message, cb) {
+Consumer.prototype._processMessages = function (messages, cb) {
   var consumer = this;
 
-  this.emit('message_received', message);
+  this.emit('message_received', messages);
+
   async.series([
-    function handleMessage(done) {
-      consumer.handleMessage(message, done);
+    function handleMessages(done) {
+      consumer.handleMessages(messages, done);
     },
-    function deleteMessage(done) {
-      consumer._deleteMessage(message, done);
+    function deleteMessages(done) {
+      consumer._deleteMessages(messages, done);
     }
   ], function (err) {
     if (err) {
@@ -157,7 +157,7 @@ Consumer.prototype._processMessage = function (message, cb) {
         consumer.emit('processing_error', err);
       }
     } else {
-      consumer.emit('message_processed', message);
+      consumer.emit('message_processed', messages);
     }
     cb();
   });
