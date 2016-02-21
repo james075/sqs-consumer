@@ -7,7 +7,7 @@ var AWS = require('aws-sdk');
 var debug = require('debug')('sqs-consumer');
 var requiredOptions = [
     'queueUrl',
-    'handleMessages'
+    'handleMessage'
   ];
 
 /**
@@ -40,7 +40,7 @@ function isAuthenticationError(err) {
  * @param {object} options
  * @param {string} options.queueUrl
  * @param {string} options.region
- * @param {function} options.handleMessages
+ * @param {function} options.handleMessage
  * @param {array} options.attributeNames
  * @param {array} options.messageAttributeNames
  * @param {number} options.batchSize
@@ -52,11 +52,12 @@ function Consumer(options) {
   validate(options);
 
   this.queueUrl = options.queueUrl;
-  this.handleMessages = options.handleMessages;
+  this.handleMessage = options.handleMessage;
   this.attributeNames = options.attributeNames || [];
   this.messageAttributeNames = options.messageAttributeNames || [];
   this.stopped = true;
   this.batchSize = options.batchSize || 1;
+  this.multipleMessageHandling = options.multipleMessageHandling || false;
   this.visibilityTimeout = options.visibilityTimeout;
   this.waitTimeSeconds = options.waitTimeSeconds || 20;
   this.authenticationErrorTimeout = options.authenticationErrorTimeout || 10000;
@@ -66,7 +67,7 @@ function Consumer(options) {
   });
 
   this._handleSqsResponseBound = this._handleSqsResponse.bind(this);
-  this._processMessageBound = this._processMessages.bind(this);
+  this._processMessageBound = this._processMessage.bind(this);
 }
 
 util.inherits(Consumer, EventEmitter);
@@ -79,7 +80,7 @@ Consumer.create = function (options) {
 };
 
 /**
- * Start polling for messages.
+ * Start polling for message.
  */
 Consumer.prototype.start = function () {
   if (this.stopped) {
@@ -90,7 +91,7 @@ Consumer.prototype.start = function () {
 };
 
 /**
- * Stop polling for messages.
+ * Stop polling for message.
  */
 Consumer.prototype.stop = function () {
   debug('Stopping consumer');
@@ -108,7 +109,7 @@ Consumer.prototype._poll = function () {
   };
 
   if (!this.stopped) {
-    debug('Polling for messages');
+    debug('Polling for message');
     this.sqs.receiveMessage(receiveParams, this._handleSqsResponseBound);
   }
 };
@@ -124,30 +125,39 @@ Consumer.prototype._handleSqsResponse = function (err, response) {
   debug(response);
 
   if (response && response.Messages && response.Messages.length > 0) {
-    this._processMessageBound(response.Messages, function() {
-      consumer._poll();
-    });
+    var poll = function() { consumer._poll() };
+
+    if (!this.multipleMessageHandling) {
+      async.eachSeries(response.Messages, this._processMessageBound, function() {
+        poll();
+      });
+    }
+    else {
+      this._processMessageBound(response.Messages, function() {
+        poll();
+      });
+    }
   } else if (err && isAuthenticationError(err)) {
     // there was an authentication error, so wait a bit before repolling
     debug('There was an authentication error. Pausing before retrying.');
     setTimeout(this._poll.bind(this), this.authenticationErrorTimeout);
   } else {
-    // there were no messages, so start polling again
+    // there were no message, so start polling again
     this._poll();
   }
 };
 
-Consumer.prototype._processMessages = function (messages, cb) {
+Consumer.prototype._processMessage = function (message, cb) {
   var consumer = this;
 
-  this.emit('message_received', messages);
+  this.emit('message_received', message);
 
   async.series([
-    function handleMessages(done) {
-      consumer.handleMessages(messages, done);
+    function handleMessage(done) {
+      consumer.handleMessage(message, done);
     },
-    function deleteMessages(done) {
-      consumer._deleteMessages(messages, done);
+    function deleteMessage(done) {
+      consumer._deleteMessage(message, done);
     }
   ], function (err) {
     if (err) {
@@ -157,33 +167,44 @@ Consumer.prototype._processMessages = function (messages, cb) {
         consumer.emit('processing_error', err);
       }
     } else {
-      consumer.emit('message_processed', messages);
+      consumer.emit('message_processed', message);
     }
     cb();
   });
 };
 
-Consumer.prototype._deleteMessages = function (messages, cb) {
+Consumer.prototype._deleteMessage = function (message, cb) {
   var deleteParams = {
-    Entries: [],
     QueueUrl: this.queueUrl
   };
 
-  messages.forEach(function(message) {
-    deleteParams.Entries.push({
-      Id: message.MessageId,
-      ReceiptHandle: message.ReceiptHandle,
-    });
-  });
-
-  debug('Deleting entries', deleteParams.Entries);
-
-  this.sqs.deleteMessageBatch(deleteParams, function (err) {
+  var callbackHandler = function(err) {
     if (err) {
       return cb(new SQSError('SQS delete message failed: ' + err.message));
     }
     cb();
-  });
+  };
+
+  if (!this.multipleMessageHandling) {
+    deleteParams.ReceiptHandle = message.ReceiptHandle;
+
+    debug('Deleting message %s', message.MessageId);
+    this.sqs.deleteMessage(deleteParams, callbackHandler);
+  }
+  else {
+    deleteParams.Entries = [];
+
+    message.forEach(function(message) {
+      deleteParams.Entries.push({
+        Id: message.MessageId,
+        ReceiptHandle: message.ReceiptHandle,
+      });
+    });
+
+    debug('Deleting entries', deleteParams.Entries);
+    this.sqs.deleteMessageBatch(deleteParams, callbackHandler);
+  }
+
 };
 
 module.exports = Consumer;
